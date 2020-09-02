@@ -1,0 +1,207 @@
+#### Bash script.
+
+#The variant calling workflow is run using both SAMtools (bcftools) and GATK. 
+#First, files are symbolically linked to personal directories to perform the analysis on 10 #burbot individuals. Bcftools and GATK are run to produce vcf files from which SNP and indel numbers can be extracted. 
+#These files will be filtered accordingly (for quality, minor allele count, and missing data) and then processed to extract allele frequency and site depth information.
+
+#1) BCFTOOLS
+#The following commands symbolically link the variant data, which are sorted bam files (individual burbot reads that were aligned to the new burbot genome reference). The first 20 files were copied into a separate directory for analysis (10 individuals, each individual has 2 files, sorted.bam and sorted.bam.bai).
+
+#Symbolic link to data.
+ln -s /scratch/emandevi/genomicmethods/PS3/bwa_assem/ /scratch/rbaghdan/genomicmethods/PS3/variantdata
+
+#Copy first 20 files.
+cp `ls | head -20` /scratch/rbaghdan/genomicmethods/PS3/variantdata/bwa_assem10
+
+#Next, bcftools is run on the 10 sorted.bam files. To do this, an interactive session is used to provide the memory bcftools requires to run faster. Variant calling using bcftools is done in one command where 'bcftools mpileup' generates the genotype likelihoods for each genomic position and 'bcftools call' calls the variants. 
+
+module load bcftools
+srun --pty --account="def-sadamowi" -t 0-01:00:00 --mem=16000 /bin/bash
+
+bcftools mpileup -f /scratch/rbaghdan/genomicmethods/PS3/new_burbot_genome/GCA_900302385.1_ASM90030238v1_genomic.fna *sorted.bam | bcftools call -m --variants-only > bcftools10.vcf
+
+#Afterwards, some statistical analyses are run on the outputted vcf file to find the number of SNPs and indels.
+
+bcftools stats bcftools10.vcf
+bcftools stats bcftools10.vcf | grep "number of SNPs:"
+#number of SNPs: 91550
+
+bcftools stats bcftools10.vcf | grep "number of indels:"
+#number of indels: 9937
+
+#Next, filter out loci where more than 50% (5) of the individuals are missing data (-max-missing 0.5), the Minor Allele Count(MAC) is more than 3 (--mac 3), the quality score is less than 30 (--minQ 30), and there are less or more than 2 alleles (using –-min-alleles 2 and –-max-alleles 2).
+
+#The above is done using vcftools. Filtering out loci where more than half the individuals are missing data is reasonable since only loci with sufficient data are desired. A quality score of 30 is also a suitable cut off as placing it higher might remove important information, whereas a lower cutoff could include bad quality loci. Also, filtering SNPs that have a minor allele count less than 3 keeps only loci of interest. Lastly, loci with only 2 alleles are of interest for this analysis (helpful for plots downstream).
+
+module load vcftools
+vcftools --gzvcf bcftools10.vcf --max-missing 0.5 --mac 3 --minQ 30 --min-alleles 2 --max-alleles 2 --recode --recode-INFO-all --out bcftools10.g5mac3
+
+#After filtering, 6410 out of a possible 101487 sites remained. Run Time = 4.00 seconds
+#The number of SNPs and indels is found after filtering.
+
+module load bcftools
+bcftools stats bcftools10.g5mac3.recode.vcf | grep "number of SNPs:"
+#number of SNPs: 5372
+
+bcftools stats bcftools10.g5mac3.recode.vcf | grep "number of indels:"
+#number of indels: 1038
+
+
+#An expected drop in the number of SNPs and indels is observed after filtering. Next, I filtered the data using a single filter argument to observe which filter had the highest impact (side analysis).
+
+module load vcftools
+
+#Filter out loci >50% individuals missing data.
+vcftools --gzvcf bcftools10.vcf --max-missing 0.5 --recode --recode-INFO-all --out bcfraw_missingloci
+#After filtering,41707 out of a possible 101487 sites remained. Run Time = 4.00 seconds
+
+#Filter out loci with MAC < 3 (minor allele count)
+vcftools --gzvcf bcftools10.vcf --mac 3 --recode --recode-INFO-all --out raw_maclt3
+#After filtering, 6809 out of a possible 101487 sites remained. Run Time = 4.00 seconds
+
+#Filter out poor quality scored loci.
+vcftools --gzvcf bcftools10.vcf --minQ 30 --recode --recode-INFO-all --out bcfraw_Qlt30
+After filtering, kept 54195 out of a possible 101487 remained. Run Time = 4.00 seconds
+
+#Clearly, it is evident that filtering using minor allele count removed the most loci.
+
+#For this analysis, only SNPs are required; therefore, indels will be filtered out. Once again, this is done using vcftools. Afterwards, the number of SNPs is found using bcftools.
+
+#Remove indels for the filtered vcf file.
+vcftools --vcf bcftools10.g5mac3.recode.vcf --remove-indels --recode --recode-INFO-all --out bcftools10_noindel
+
+#Check to see if it works.
+bcftools stats bcftools10_noindel.recode.vcf | grep "number of indels:"
+number of indels: 0
+
+#Next, the allele frequency and site depth for the final filtered vcf file are found.
+#Allele frequency for each locus.
+vcftools --vcf bcftools10_noindel.recode.vcf --freq --out bcfallelefreq
+
+#Allele depth for each locus.
+grep -oP 'DP=\d+' bcftools10_noindel.recode.vcf > bcfdepth_perlocus.txt
+
+#The allele frequency output file contains the frequency of alleles for each locus across all individuals and the depth file contains the allele depth for each locus across all individuals. Since the analysis is focusing on 10 individuals only, filtering by individuals will not be done.
+
+2) GATK
+
+#Similarly, the same steps will be taken for GATK. For GATK, read groups are required within the sorted.bam files. From within the /scratch/emandevi/genomicmethods/PS3/bwa_assem_withRG directory, the first 20 files (10 individuals) were copied into my directory. These are the same individuals used in the bcftools analysis.
+
+cp `ls | head -20` /scratch/rbaghdan/genomicmethods/PS3/variantdata/bwa_assem10_RG/
+
+#From within the bwa_assem10_RG directory, the sorted bam file names were input into a list (for multiple bam files, *sorted.bam does not work. GATK requires a list of the bam file names in a text file)
+
+ls *sorted.bam >> ../readgroupbamGATK.list
+
+#The path to each individual was added as well.
+#The following command checks if read groups are present in the sorted bam files (If nothing appears after running this, read groups must be added to the files).
+
+samtools view -H *sorted.bam | grep "@RG"
+
+#GATK requires the reference to be indexed in its own very-special format
+
+module load picard
+java -jar $EBROOTPICARD/picard.jar CreateSequenceDictionary R=GCA_900302385.1_ASM90030238v1_genomic.fna O=GCA_900302385.1_ASM90030238v1_genomic.dict
+
+#Gatk was run using an sbatch script (runGATKvariantcall.sh).
+
+#Afterwards, some statistical analyses are run on the outputted vcf file to find the number of SNPs and indels.
+
+bcftools stats variants_gatk2.vcf | grep "number of SNPs:"
+#number of SNPs: 30791
+
+bcftools stats variants_gatk2.vcf | grep "number of indels:"
+#number of indels: 4298
+
+#Next, filter out loci where more than 50% (5) of the individuals are missing data (-max-missing 0.5), the Minor Allele Count(MAC) is less than 3 (--mac 3), the quality score is less than 30 (--minQ 30), and there are less or more than 2 alleles (using --min-alleles 2 and --max-alleles 2). This is done using vcftools. The exact same filters used for bcftools are applied here to ensure these factors are controlled during comparative analysis.
+
+vcftools --gzvcf variants_gatk2.vcf --max-missing 0.5 --mac 3 --minQ 30 --min-alleles 2 --max-alleles 2 --recode --recode-INFO-all --out gatktools10.g5mac3
+
+#After filtering, 4275 out of a possible 35058 sites remained.
+Run Time = 4.00 seconds
+
+#The number of SNPs and indels is found after filtering.
+module load bcftools
+bcftools stats gatktools10.g5mac3.recode.vcf | grep "number of SNPs:"
+#number of SNPs: 3739
+bcftools stats gatktools10.g5mac3.recode.vcf | grep "number of indels:"
+#number of indels: 536
+
+#As expected, the number of SNPs and indels drops after filtering. Next, I filtered the data using a single filter argument to observe which filter had the highest impact (side analysis).
+
+module load vcftools
+
+#Filter out loci >50% individuals missing data.
+vcftools --gzvcf variants_gatk2.vcf --max-missing 0.5 --recode --recode-INFO-all --out gatkraw_missingloci
+After filtering, 26466 out of a possible 35058 sites remained. Run Time = 4.00 seconds
+
+#Filter out loci with MAC < 3 (minor allele count)
+vcftools --gzvcf variants_gatk2.vcf --mac 3 --recode --recode-INFO-all --out gatkraw_maclt3
+#After filtering, 4369 out of a possible 35058 sites remained. Run Time = 4.00 seconds
+
+#Filter out poor quality scored loci.
+vcftools --gzvcf variants_gatk2.vcf --minQ 30 --recode --recode-INFO-all --out gatkraw_Qlt30
+After filtering, 35058 out of a possible 35058 sites remained. Run Time = 4.00 seconds
+
+#Clearly, it is evident that filtering using minor allele count removed the most loci (just as in bcftools).
+
+#For this analysis, only SNPs are required; therefore, indels will be filtered out. Once again, this is done using vcftools. The number of SNPs is found using bcftools.
+
+#Remove indels.
+vcftools --vcf gatktools10.g5mac3.recode.vcf --remove-indels --recode --recode-INFO-all --out gatktools10_noindel
+
+#After filtering, 3739 out of a possible 4275 sites remained. Run Time = 4.00 seconds
+
+#Next, the allele frequency and site depth for the final filtered vcf file are found.
+
+#Allele frequency for each locus.
+vcftools --vcf gatktools10_noindel.recode.vcf --freq --out gatkallelefreq
+
+#Allele depth
+grep -oP 'DP=\d+' gatktools10_noindel.recode.vcf > gatkdepth_perlocus.txt
+
+#The allele frequency output file contains the frequency of alleles for each locus across all individuals and the depth file contains the allele depth for each locus across all individuals.
+
+#Since the analysis is focusing on 10 individuals only, filtering by individuals will not be done.
+
+#3) Compare the vcf files.
+
+#After both vcf files from the two variant callers are ready, comparative analysis can be done. To do this, the vcf files need to be zipped and indexed. Next, the intersection (SNP overlap) of the 2 files is found with bcftools isec.
+
+#Zip and index both files.
+
+bgzip bcftools10_noindel.recode.vcf
+bcftools index bcftools10_noindel.recode.vcf.gz
+
+bgzip gatktools10_noindel.recode.vcf
+bcftools index gatktools10_noindel.recode.vcf.gz
+
+#Find intersection.
+
+bcftools isec -p isec /scratch/rbaghdan/genomicmethods/PS3/variantdata/bwa_assem10/bcftools10_noindel.recode.vcf.gz /scratch/rbaghdan/genomicmethods/PS3/variantdata/bwa_assem10_RG/gatktools10_noindel.recode.vcf.gz
+
+#After running the command, a directory called isec is created which contains 4 vcf files. 
+#The first contains the variants unique to the vcf file created by bcftools. 
+#The second contains the variants unique to the vcf file created by gatk. 
+#The third contains records from the bcftools vcf that are shared by both the bcftools and gatk vcfs. 
+#The fourth contains records from the gatk vcf that are shared by both the bcftools and gatk vcfs. The number of SNPs in all 4 vcf files is found.
+
+bcftools stats 0000.vcf | grep "number of SNPs:"
+#number of SNPs: 2231
+
+bcftools stats 0001.vcf | grep "number of SNPs:"
+#number of SNPs: 598
+
+bcftools stats 0002.vcf | grep "number of SNPs:"
+#number of SNPs: 3141
+
+bcftools stats 0003.vcf | grep "number of SNPs:"
+#number of SNPs: 3141
+
+#Next, the files need to be copied from graham to my local server for analysis in R.
+#Transfer the site depth file for both variant callers.
+scp rbaghdan@graham.computecanada.ca:/scratch/rbaghdan/genomicmethods/PS3/variantdata/bwa_assem10/bcfdepth_perlocus.txt ~/Desktop/genomicmeth/Problemset3
+scp rbaghdan@graham.computecanada.ca:/scratch/rbaghdan/genomicmethods/PS3/variantdata/bwa_assem10_RG/gatkdepth_perlocus.txt ~/Desktop/genomicmeth/Problemset3
+#Transfer the allele frequency file.
+scp rbaghdan@graham.computecanada.ca:/scratch/rbaghdan/genomicmethods/PS3/variantdata/bwa_assem10_RG/gatkallelefreq.frq ~/Desktop/genomicmeth/Problemset3
+scp rbaghdan@graham.computecanada.ca:/scratch/rbaghdan/genomicmethods/PS3/variantdata/bwa_assem10/bcfallelefreq.frq ~/Desktop/genomicmeth/Problemset3
